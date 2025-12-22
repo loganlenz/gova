@@ -45,15 +45,47 @@ class Config:
     DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
     SKIP_SIGNATURE_VERIFICATION = os.environ.get("SKIP_SIGNATURE_VERIFICATION", "false").lower() == "true"
     
-    # Sync settings
+    # Properties to fetch from source (GOVA HubSpot)
     PROPERTIES_TO_SYNC = [
-        "email", "firstname", "lastname", "phone", "company",
-        "jobtitle", "address", "city", "state", "zip", "country",
-        "website", "lifecyclestage", "hs_lead_status"
+        # Standard contact fields
+        "firstname",
+        "lastname", 
+        "phone",
+        "email",
+        "address",
+        "city",
+        "state",
+        "zip",
+        # Military fields
+        "military_status___dropdown",
+        "military_branch___dropdown",
+        "military_rank",
+        # Other custom fields
+        "verify_date_of_birth",
+        "armed_forces_mutual_member",
+        "edge_sso_sign_up",
+        "edge_xp_earned__all_time_",
+        "edge_initial_financial_assessment_completed_date",
+        "stress_score_total",
+        "stress_score_completed_date",
+        "opted_out_of_communications_afm",
+    ]
+    
+    # Property mapping: source (GOVA) -> destination (Armed Forces Mutual)
+    # Only include properties that have DIFFERENT names in destination
+    PROPERTY_MAPPING = {
+        "opted_out_of_communications_afm": "hs_email_optout_27547260",
+    }
+    
+    # Properties that exist in source but should NOT be synced to destination
+    # (because destination doesn't have these fields)
+    PROPERTIES_TO_SKIP = [
+        "military_status___dropdown",
+        "military_branch___dropdown", 
+        "armed_forces_mutual_member",
     ]
     
     # Optional: Only sync contacts from specific forms (leave empty for all)
-    # Add form GUIDs here to filter, e.g., ["abc123-def456", "xyz789"]
     FORM_FILTER = os.environ.get("FORM_FILTER", "").split(",") if os.environ.get("FORM_FILTER") else []
 
 
@@ -208,6 +240,42 @@ def verify_hubspot_signature(f):
 
 
 # =============================================================================
+# PROPERTY MAPPING
+# =============================================================================
+
+def map_properties_for_destination(source_props: dict) -> dict:
+    """
+    Transform source properties to destination format.
+    
+    - Skips properties that don't exist in destination
+    - Renames properties that have different names in destination
+    - Only includes properties that have values
+    """
+    dest_props = {}
+    
+    for source_key, value in source_props.items():
+        # Skip empty values
+        if not value:
+            continue
+            
+        # Skip properties that shouldn't be synced
+        if source_key in Config.PROPERTIES_TO_SKIP:
+            logger.debug(f"Skipping property {source_key} - not in destination")
+            continue
+        
+        # Check if this property needs to be renamed
+        if source_key in Config.PROPERTY_MAPPING:
+            dest_key = Config.PROPERTY_MAPPING[source_key]
+            logger.debug(f"Mapping {source_key} -> {dest_key}")
+        else:
+            dest_key = source_key
+        
+        dest_props[dest_key] = value
+    
+    return dest_props
+
+
+# =============================================================================
 # SYNC LOGIC
 # =============================================================================
 
@@ -239,11 +307,10 @@ def sync_contact_to_partner(contact_id: str, event_type: str = "unknown") -> dic
             result["message"] = "Contact has no email"
             return result
         
-        # Filter to only properties with values
-        sync_props = {
-            k: v for k, v in props.items() 
-            if k in Config.PROPERTIES_TO_SYNC and v
-        }
+        # Map properties to destination format
+        sync_props = map_properties_for_destination(props)
+        
+        logger.debug(f"Syncing properties: {list(sync_props.keys())}")
         
         # Sync to destination portal
         dest = HubSpotAPI(Config.DEST_TOKEN)
@@ -287,7 +354,9 @@ def index():
             "source_token_set": bool(Config.SOURCE_TOKEN),
             "dest_token_set": bool(Config.DEST_TOKEN),
             "client_secret_set": bool(Config.CLIENT_SECRET),
-            "properties": Config.PROPERTIES_TO_SYNC,
+            "properties_to_sync": Config.PROPERTIES_TO_SYNC,
+            "property_mapping": Config.PROPERTY_MAPPING,
+            "properties_skipped": Config.PROPERTIES_TO_SKIP,
             "form_filter": Config.FORM_FILTER or "all forms"
         }
     })
