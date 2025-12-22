@@ -56,10 +56,9 @@ class Config:
         "city",
         "state",
         "zip",
-        # Military fields
+        # Military fields (military_rank excluded - incompatible field type)
         "military_status___dropdown",
         "military_branch___dropdown",
-        "military_rank",
         # Other custom fields
         "verify_date_of_birth",
         "armed_forces_mutual_member",
@@ -77,12 +76,21 @@ class Config:
         "opted_out_of_communications_afm": "hs_email_optout_27547260",
     }
     
-    # Properties that exist in source but should NOT be synced to destination
-    # (because destination doesn't have these fields)
+    # Properties that should NOT be synced to destination
+    # Includes: read-only system fields, fields that don't exist in destination,
+    # and fields with incompatible types between source and destination
     PROPERTIES_TO_SKIP = [
+        # Read-only HubSpot system properties
+        "createdate",
+        "hs_object_id",
+        "lastmodifieddate",
+        "hs_createdate",
+        # Fields that don't exist in destination
         "military_status___dropdown",
         "military_branch___dropdown", 
         "armed_forces_mutual_member",
+        # Fields with incompatible types (source=text, destination=dropdown with GUIDs)
+        "military_rank",
     ]
     
     # Optional: Only sync contacts from specific forms (leave empty for all)
@@ -249,7 +257,8 @@ def map_properties_for_destination(source_props: dict) -> dict:
     """
     Transform source properties to destination format.
     
-    - Skips properties that don't exist in destination
+    - Only includes properties explicitly listed in PROPERTIES_TO_SYNC
+    - Skips properties in PROPERTIES_TO_SKIP
     - Renames properties that have different names in destination
     - Only includes properties that have values
     """
@@ -259,10 +268,14 @@ def map_properties_for_destination(source_props: dict) -> dict:
         # Skip empty values
         if not value:
             continue
+        
+        # Only allow properties explicitly in our sync list
+        if source_key not in Config.PROPERTIES_TO_SYNC:
+            continue
             
         # Skip properties that shouldn't be synced
         if source_key in Config.PROPERTIES_TO_SKIP:
-            logger.debug(f"Skipping property {source_key} - not in destination")
+            logger.debug(f"Skipping property {source_key} - in skip list")
             continue
         
         # Check if this property needs to be renamed
