@@ -145,6 +145,8 @@ class HubSpotAPI:
                     time.sleep(retry_after)
                     continue
                 
+                if not response.ok:
+                    logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 response.raise_for_status()
                 return response.json() if response.text else {}
                 
