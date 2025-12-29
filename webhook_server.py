@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubSpot Webhook Sync Server (Simplified)
+HubSpot Webhook Sync Server
 
 Automatically syncs contacts to a partner HubSpot portal when:
 - A contact submits a form
@@ -35,8 +35,11 @@ class Config:
     # Server settings
     PORT = int(os.environ.get("PORT", 8080))
     
-    # Sync settings - customize these as needed
-    PROPERTIES_TO_SYNC = [
+    # Minimal safe properties that should exist in any HubSpot portal
+    SAFE_PROPERTIES = ["email", "firstname", "lastname", "phone", "company"]
+    
+    # Full list of properties to try syncing
+    ALL_PROPERTIES = [
         "email", "firstname", "lastname", "phone", "company",
         "jobtitle", "address", "city", "state", "zip", "country",
         "website", "lifecyclestage", "hs_lead_status"
@@ -78,43 +81,41 @@ class HubSpotAPI:
             "Content-Type": "application/json"
         }
     
-    def _request(self, method: str, endpoint: str, data: dict = None, retries: int = 3) -> dict:
-        """Make API request with retry logic."""
+    def _request(self, method: str, endpoint: str, data: dict = None) -> tuple:
+        """Make API request. Returns (success, response_or_error)."""
         url = f"{self.BASE_URL}{endpoint}"
         
-        for attempt in range(retries):
-            try:
-                response = requests.request(
-                    method=method,
-                    url=url,
-                    headers=self.headers,
-                    json=data,
-                    timeout=30
-                )
-                
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", 10))
-                    logger.warning(f"Rate limited, waiting {retry_after}s...")
-                    time.sleep(retry_after)
-                    continue
-                
-                response.raise_for_status()
-                return response.json() if response.text else {}
-                
-            except requests.exceptions.RequestException as e:
-                if attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise
-        
-        return {}
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=self.headers,
+                json=data,
+                timeout=30
+            )
+            
+            # Handle rate limiting
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 10))
+                logger.warning(f"Rate limited, waiting {retry_after}s...")
+                time.sleep(retry_after)
+                return self._request(method, endpoint, data)
+            
+            if response.status_code >= 400:
+                error_msg = response.text[:500]
+                return False, f"{response.status_code}: {error_msg}"
+            
+            return True, response.json() if response.text else {}
+            
+        except Exception as e:
+            return False, str(e)
     
-    def get_contact(self, contact_id: str, properties: list) -> dict:
+    def get_contact(self, contact_id: str, properties: list) -> tuple:
         """Get contact by ID."""
         props = ",".join(properties)
         return self._request("GET", f"/crm/v3/objects/contacts/{contact_id}?properties={props}")
     
-    def search_by_email(self, email: str) -> dict:
+    def search_by_email(self, email: str) -> tuple:
         """Find contact by email."""
         data = {
             "filterGroups": [{
@@ -125,15 +126,17 @@ class HubSpotAPI:
                 }]
             }]
         }
-        result = self._request("POST", "/crm/v3/objects/contacts/search", data)
-        results = result.get("results", [])
-        return results[0] if results else None
+        success, result = self._request("POST", "/crm/v3/objects/contacts/search", data)
+        if success:
+            results = result.get("results", [])
+            return True, results[0] if results else None
+        return False, result
     
-    def create_contact(self, properties: dict) -> dict:
+    def create_contact(self, properties: dict) -> tuple:
         """Create a new contact."""
         return self._request("POST", "/crm/v3/objects/contacts", {"properties": properties})
     
-    def update_contact(self, contact_id: str, properties: dict) -> dict:
+    def update_contact(self, contact_id: str, properties: dict) -> tuple:
         """Update existing contact."""
         return self._request("PATCH", f"/crm/v3/objects/contacts/{contact_id}", {"properties": properties})
 
@@ -153,12 +156,14 @@ def sync_contact_to_partner(contact_id: str, event_type: str = "unknown") -> dic
     }
     
     try:
+        # Get contact from source
         source = HubSpotAPI(Config.SOURCE_TOKEN)
-        contact = source.get_contact(contact_id, Config.PROPERTIES_TO_SYNC)
+        success, contact = source.get_contact(contact_id, Config.ALL_PROPERTIES)
         
-        if not contact:
+        if not success:
             result["status"] = "error"
-            result["message"] = "Contact not found in source portal"
+            result["message"] = f"Failed to get contact from source: {contact}"
+            logger.error(f"[{event_type}] {result['message']}")
             return result
         
         props = contact.get("properties", {})
@@ -167,55 +172,64 @@ def sync_contact_to_partner(contact_id: str, event_type: str = "unknown") -> dic
         if not email:
             result["status"] = "skipped"
             result["message"] = "Contact has no email"
+            logger.info(f"[{event_type}] Skipped contact {contact_id} - no email")
             return result
         
-        sync_props = {
-            k: v for k, v in props.items() 
-            if k in Config.PROPERTIES_TO_SYNC and v
-        }
-        
+        # Check if contact exists in destination
         dest = HubSpotAPI(Config.DEST_TOKEN)
-        existing = dest.search_by_email(email)
+        success, existing = dest.search_by_email(email)
         
-        # Log what we're syncing
-        logger.info(f"Syncing properties: {list(sync_props.keys())}")
+        if not success:
+            result["status"] = "error"
+            result["message"] = f"Failed to search destination: {existing}"
+            logger.error(f"[{event_type}] {result['message']}")
+            return result
         
-        try:
-            if existing:
-                dest.update_contact(existing["id"], sync_props)
-                result["status"] = "updated"
-                result["message"] = f"Updated contact: {email}"
-            else:
-                dest.create_contact(sync_props)
-                result["status"] = "created"
-                result["message"] = f"Created contact: {email}"
-        except requests.exceptions.HTTPError as e:
-            # If 400 error, try with minimal properties
-            if e.response.status_code == 400:
-                logger.warning(f"400 error with full properties, trying minimal set...")
-                minimal_props = {k: v for k, v in sync_props.items() 
-                               if k in ["email", "firstname", "lastname", "phone", "company"]}
-                logger.info(f"Retrying with: {list(minimal_props.keys())}")
-                
-                if existing:
-                    dest.update_contact(existing["id"], minimal_props)
-                    result["status"] = "updated"
-                    result["message"] = f"Updated contact (minimal props): {email}"
-                else:
-                    dest.create_contact(minimal_props)
-                    result["status"] = "created"
-                    result["message"] = f"Created contact (minimal props): {email}"
-            else:
-                raise
+        # Try full properties first
+        full_props = {k: v for k, v in props.items() if k in Config.ALL_PROPERTIES and v}
+        logger.info(f"Attempting sync with properties: {list(full_props.keys())}")
         
-        logger.info(f"[{event_type}] {result['message']}")
+        if existing:
+            success, response = dest.update_contact(existing["id"], full_props)
+        else:
+            success, response = dest.create_contact(full_props)
+        
+        if success:
+            action = "Updated" if existing else "Created"
+            result["status"] = "updated" if existing else "created"
+            result["message"] = f"{action} contact: {email}"
+            logger.info(f"[{event_type}] {result['message']}")
+            return result
+        
+        # If full properties failed, try with safe/minimal properties
+        logger.warning(f"Full sync failed: {response}")
+        logger.info("Retrying with minimal properties...")
+        
+        safe_props = {k: v for k, v in props.items() if k in Config.SAFE_PROPERTIES and v}
+        logger.info(f"Using minimal properties: {list(safe_props.keys())}")
+        
+        if existing:
+            success, response = dest.update_contact(existing["id"], safe_props)
+        else:
+            success, response = dest.create_contact(safe_props)
+        
+        if success:
+            action = "Updated" if existing else "Created"
+            result["status"] = "updated" if existing else "created"
+            result["message"] = f"{action} contact (minimal): {email}"
+            logger.info(f"[{event_type}] {result['message']}")
+        else:
+            result["status"] = "error"
+            result["message"] = f"Failed even with minimal properties: {response}"
+            logger.error(f"[{event_type}] {result['message']}")
+        
+        return result
         
     except Exception as e:
         result["status"] = "error"
         result["message"] = str(e)
-        logger.error(f"[{event_type}] Error syncing contact {contact_id}: {e}")
-    
-    return result
+        logger.error(f"[{event_type}] Exception syncing contact {contact_id}: {e}")
+        return result
 
 
 # =============================================================================
@@ -236,7 +250,8 @@ def index():
         "config": {
             "source_token_set": bool(Config.SOURCE_TOKEN),
             "dest_token_set": bool(Config.DEST_TOKEN),
-            "properties": Config.PROPERTIES_TO_SYNC
+            "properties": Config.ALL_PROPERTIES,
+            "safe_properties": Config.SAFE_PROPERTIES
         }
     })
 
@@ -249,16 +264,11 @@ def health():
 
 @app.route("/webhooks/hubspot", methods=["POST"])
 def hubspot_webhook():
-    """
-    Handle HubSpot webhook events.
-    
-    NOTE: Signature verification is disabled for simplicity.
-    For production, you should enable it for security.
-    """
+    """Handle HubSpot webhook events."""
     
     try:
         events = request.json
-        logger.info(f"Webhook received: {json.dumps(events)[:200]}")
+        logger.info(f"Webhook received with {len(events) if isinstance(events, list) else 1} event(s)")
         
         if not isinstance(events, list):
             events = [events]
@@ -271,10 +281,7 @@ def hubspot_webhook():
             
             logger.info(f"Processing: {subscription_type} for contact {object_id}")
             
-            if subscription_type in [
-                "contact.creation",
-                "contact.propertyChange",
-            ]:
+            if subscription_type in ["contact.creation", "contact.propertyChange"]:
                 result = sync_contact_to_partner(object_id, subscription_type)
                 results.append(result)
             else:
@@ -293,7 +300,7 @@ def hubspot_webhook():
 
 @app.route("/test/sync/<contact_id>", methods=["GET", "POST"])
 def test_sync(contact_id):
-    """Manually trigger a sync for testing. Works with GET or POST."""
+    """Manually trigger a sync for testing."""
     if not Config.SOURCE_TOKEN or not Config.DEST_TOKEN:
         return jsonify({"error": "Tokens not configured"}), 500
     
@@ -306,19 +313,13 @@ def test_connection():
     """Test connections to both HubSpot portals."""
     results = {}
     
-    try:
-        source = HubSpotAPI(Config.SOURCE_TOKEN)
-        source._request("GET", "/crm/v3/objects/contacts?limit=1")
-        results["source"] = {"status": "connected"}
-    except Exception as e:
-        results["source"] = {"status": "error", "message": str(e)}
+    source = HubSpotAPI(Config.SOURCE_TOKEN)
+    success, response = source._request("GET", "/crm/v3/objects/contacts?limit=1")
+    results["source"] = {"status": "connected"} if success else {"status": "error", "message": response}
     
-    try:
-        dest = HubSpotAPI(Config.DEST_TOKEN)
-        dest._request("GET", "/crm/v3/objects/contacts?limit=1")
-        results["destination"] = {"status": "connected"}
-    except Exception as e:
-        results["destination"] = {"status": "error", "message": str(e)}
+    dest = HubSpotAPI(Config.DEST_TOKEN)
+    success, response = dest._request("GET", "/crm/v3/objects/contacts?limit=1")
+    results["destination"] = {"status": "connected"} if success else {"status": "error", "message": response}
     
     return jsonify(results)
 
