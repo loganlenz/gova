@@ -38,11 +38,12 @@ class Config:
     # Minimal safe properties that should exist in any HubSpot portal
     SAFE_PROPERTIES = ["email", "firstname", "lastname", "phone", "company"]
     
-    # Full list of properties to try syncing
+    # Full list of properties to sync
+    # Note: lifecyclestage and hs_lead_status removed - they have portal-specific values
     ALL_PROPERTIES = [
         "email", "firstname", "lastname", "phone", "company",
         "jobtitle", "address", "city", "state", "zip", "country",
-        "website", "lifecyclestage", "hs_lead_status"
+        "website"
     ]
 
 
