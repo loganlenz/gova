@@ -177,14 +177,36 @@ def sync_contact_to_partner(contact_id: str, event_type: str = "unknown") -> dic
         dest = HubSpotAPI(Config.DEST_TOKEN)
         existing = dest.search_by_email(email)
         
-        if existing:
-            dest.update_contact(existing["id"], sync_props)
-            result["status"] = "updated"
-            result["message"] = f"Updated contact: {email}"
-        else:
-            dest.create_contact(sync_props)
-            result["status"] = "created"
-            result["message"] = f"Created contact: {email}"
+        # Log what we're syncing
+        logger.info(f"Syncing properties: {list(sync_props.keys())}")
+        
+        try:
+            if existing:
+                dest.update_contact(existing["id"], sync_props)
+                result["status"] = "updated"
+                result["message"] = f"Updated contact: {email}"
+            else:
+                dest.create_contact(sync_props)
+                result["status"] = "created"
+                result["message"] = f"Created contact: {email}"
+        except requests.exceptions.HTTPError as e:
+            # If 400 error, try with minimal properties
+            if e.response.status_code == 400:
+                logger.warning(f"400 error with full properties, trying minimal set...")
+                minimal_props = {k: v for k, v in sync_props.items() 
+                               if k in ["email", "firstname", "lastname", "phone", "company"]}
+                logger.info(f"Retrying with: {list(minimal_props.keys())}")
+                
+                if existing:
+                    dest.update_contact(existing["id"], minimal_props)
+                    result["status"] = "updated"
+                    result["message"] = f"Updated contact (minimal props): {email}"
+                else:
+                    dest.create_contact(minimal_props)
+                    result["status"] = "created"
+                    result["message"] = f"Created contact (minimal props): {email}"
+            else:
+                raise
         
         logger.info(f"[{event_type}] {result['message']}")
         
