@@ -44,14 +44,11 @@ class Config:
         "email", "firstname", "lastname", "phone",
         "address", "city", "state", "zip",
         # Military fields
-        "military_status___dropdown",
-        "military_branch___dropdown",
         "military_rank",
         # Date fields
         "verify_date_of_birth",
         "edge_sso_sign_up",
         # Membership & scores
-        "armed_forces_mutual_member",
         "edge_xp_earned__all_time_",
         "edge_initial_financial_assessment_completed_date",
         "stress_score_total",
