@@ -43,8 +43,6 @@ class Config:
         # Standard fields
         "email", "firstname", "lastname", "phone",
         "address", "city", "state", "zip",
-        # Military fields
-        "military_rank",
         # Date fields
         "verify_date_of_birth",
         "edge_sso_sign_up",
